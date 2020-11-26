@@ -1051,6 +1051,7 @@ func (c *RaftCluster) BuryStore(storeID uint64, force bool) error {
 		zap.Uint64("store-id", newStore.GetID()),
 		zap.String("store-address", newStore.GetAddress()))
 	err := c.putStoreLocked(newStore)
+	c.onStoreVersionChangeLocked()
 	if err == nil {
 		c.RemoveStoreLimit(storeID)
 	}
@@ -1304,11 +1305,11 @@ func (c *RaftCluster) AllocID() (uint64, error) {
 func (c *RaftCluster) OnStoreVersionChange() {
 	c.RLock()
 	defer c.RUnlock()
-	var (
-		minVersion     *semver.Version
-		clusterVersion *semver.Version
-	)
+	c.onStoreVersionChangeLocked()
+}
 
+func (c *RaftCluster) onStoreVersionChangeLocked() {
+	var minVersion *semver.Version
 	stores := c.GetStores()
 	for _, s := range stores {
 		if s.IsTombstone() {
@@ -1320,7 +1321,7 @@ func (c *RaftCluster) OnStoreVersionChange() {
 			minVersion = v
 		}
 	}
-	clusterVersion = c.opt.GetClusterVersion()
+	clusterVersion := c.opt.GetClusterVersion()
 	// If the cluster version of PD is less than the minimum version of all stores,
 	// it will update the cluster version.
 	failpoint.Inject("versionChangeConcurrency", func() {
