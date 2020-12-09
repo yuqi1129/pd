@@ -59,7 +59,6 @@ func (s *clusterTestSuite) TestClusterAndPing(c *C) {
 	ci := &metapb.Cluster{}
 	c.Assert(json.Unmarshal(output, ci), IsNil)
 	c.Assert(ci, DeepEquals, cluster.GetCluster())
-
 	echo := pdctl.GetEcho([]string{"-u", pdAddr, "--cacert=ca.pem", "cluster"})
 	c.Assert(strings.Contains(echo, "no such file or directory"), IsTrue)
 
