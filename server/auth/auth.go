@@ -15,8 +15,6 @@ package auth
 
 import (
 	"encoding/json"
-	"path"
-	"strings"
 	"sync"
 
 	"github.com/tikv/pd/pkg/errs"
@@ -26,7 +24,262 @@ import (
 
 // RBACManager is used for the rbac storage, cache, management and enforcing logic.
 type RBACManager struct {
+	userManager
 	roleManager
+}
+
+// NewRBACManager creates a new RBACManager.
+func NewRBACManager(kv kv.Base) *RBACManager {
+	return &RBACManager{
+		userManager{
+			kv:    kv,
+			users: make(map[string]*User),
+		},
+		roleManager{
+			kv:    kv,
+			roles: make(map[string]*Role),
+		}}
+}
+
+type userManager struct {
+	kv    kv.Base
+	mu    sync.RWMutex
+	users map[string]*User
+}
+
+// newUserManager creates a new roleManager.
+func newUserManager(kv kv.Base) *userManager {
+	return &userManager{kv: kv, users: make(map[string]*User)}
+}
+
+// GetUser returns a user.
+func (m *userManager) GetUser(name string) (*User, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	user, ok := m.users[name]
+	if !ok {
+		return nil, errs.ErrUserNotFound.FastGenByArgs(name)
+	}
+
+	return user, nil
+}
+
+// GetUsers returns all available roles.
+func (m *userManager) GetUsers() map[string]*User {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	return m.users
+}
+
+// CreateUser creates a new user.
+func (m *userManager) CreateUser(name string, password string) error {
+	_, err := m.GetUser(name)
+	if err == nil {
+		return errs.ErrUserExists.GenWithStackByArgs(name)
+	}
+
+	user, err := NewUser(name, GenerateHash(password))
+	if err != nil {
+		return err
+	}
+
+	userJSON, err := json.Marshal(user)
+	if err != nil {
+		return errs.ErrJSONMarshal.Wrap(err).GenWithStackByCause()
+	}
+	userPath := GetUserPath(name)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Add user to kv.
+	err = m.kv.Save(userPath, string(userJSON))
+	if err != nil {
+		return err
+	}
+
+	// Add user to memory cache.
+	m.users[name] = user
+
+	return nil
+}
+
+// DeleteUser deletes a user.
+func (m *userManager) DeleteUser(name string) error {
+	_, err := m.GetUser(name)
+	if err != nil {
+		return err
+	}
+
+	userPath := GetUserPath(name)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Delete user from kv.
+	err = m.kv.Remove(userPath)
+	if err != nil {
+		return err
+	}
+
+	// Delete user from memory cache.
+	delete(m.users, name)
+
+	return nil
+}
+
+// ChangePassword changes password of a user.
+func (m *userManager) ChangePassword(name string, password string) error {
+	user, err := m.GetUser(name)
+	if err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	updatedUser := user.Clone()
+	hash := GenerateHash(password)
+	updatedUser.Hash = hash
+
+	// Update user in kv
+	userJSON, err := json.Marshal(updatedUser)
+	if err != nil {
+		return errs.ErrJSONMarshal.Wrap(err).GenWithStackByCause()
+	}
+	userPath := GetUserPath(name)
+
+	err = m.kv.Save(userPath, string(userJSON))
+	if err != nil {
+		return err
+	}
+
+	// Update user in memory cache.
+	user.Hash = hash
+
+	return nil
+}
+
+// SetRoles sets roles of a user.
+func (m *userManager) SetRoles(name string, roles []string) error {
+	user, err := m.GetUser(name)
+	if err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	updatedUser := user.Clone()
+	updatedUser.RoleKeys = roles
+
+	// Update user in kv
+	userJSON, err := json.Marshal(updatedUser)
+	if err != nil {
+		return errs.ErrJSONMarshal.Wrap(err).GenWithStackByCause()
+	}
+	userPath := GetUserPath(name)
+
+	err = m.kv.Save(userPath, string(userJSON))
+	if err != nil {
+		return err
+	}
+
+	// Update user in memory cache.
+	user.RoleKeys = roles
+
+	return nil
+}
+
+// AddRole adds a role to a user.
+func (m *userManager) AddRole(name string, role string) error {
+	user, err := m.GetUser(name)
+	if err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if ok := user.appendRole(role); !ok {
+		return errs.ErrUserHasRole.FastGenByArgs(name, role)
+	}
+
+	userJSON, err := json.Marshal(role)
+	if err != nil {
+		return errs.ErrJSONMarshal.Wrap(err).GenWithStackByCause()
+	}
+	userPath := GetUserPath(name)
+
+	// Update user in kv.
+	err = m.kv.Save(userPath, string(userJSON))
+	if err != nil {
+		return err
+	}
+
+	// Update user in memory cache.
+	m.users[name] = user
+
+	return nil
+}
+
+// RemoveRole removes a role from a user.
+func (m *userManager) RemoveRole(name string, role string) error {
+	user, err := m.GetUser(name)
+	if err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if ok := user.removeRole(role); !ok {
+		return errs.ErrUserMissingRole.FastGenByArgs(name, role)
+	}
+
+	userJSON, err := json.Marshal(role)
+	if err != nil {
+		return errs.ErrJSONMarshal.Wrap(err).GenWithStackByCause()
+	}
+	userPath := GetUserPath(name)
+
+	// Update user in kv.
+	err = m.kv.Save(userPath, string(userJSON))
+	if err != nil {
+		return err
+	}
+
+	// Update user in memory cache.
+	m.users[name] = user
+
+	return nil
+}
+
+// UpdateCache refreshes in-memory cache of users.
+func (m *userManager) UpdateCache() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	userPath := GetUserPath("")
+
+	keys, values, err := m.kv.LoadRange(userPath, clientv3.GetPrefixRangeEnd(userPath), 0)
+	if err != nil {
+		return err
+	}
+
+	m.users = make(map[string]*User)
+	for i := range keys {
+		value := values[i]
+
+		user, err := UnmarshalUser(value)
+		if err != nil {
+			return err
+		}
+		m.users[user.Username] = user
+	}
+	return nil
 }
 
 type roleManager struct {
@@ -77,7 +330,7 @@ func (m *roleManager) CreateRole(name string) error {
 	if err != nil {
 		return errs.ErrJSONMarshal.Wrap(err).GenWithStackByCause()
 	}
-	rolePath := path.Join(rolePrefix, name)
+	rolePath := GetRolePath(name)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -101,7 +354,7 @@ func (m *roleManager) DeleteRole(name string) error {
 		return err
 	}
 
-	rolePath := path.Join(rolePrefix, name)
+	rolePath := GetRolePath(name)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -141,21 +394,24 @@ func (m *roleManager) SetPermissions(name string, permissions []Permission) erro
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	role.Permissions = permissions
+	updatedRole := role.Clone()
+	updatedRole.Permissions = permissions
 
 	// Update role in kv
-	roleJSON, err := json.Marshal(role)
+	roleJSON, err := json.Marshal(updatedRole)
 	if err != nil {
 		return errs.ErrJSONMarshal.Wrap(err).GenWithStackByCause()
 	}
-	rolePath := path.Join(rolePrefix, name)
+	rolePath := GetRolePath(name)
 
 	err = m.kv.Save(rolePath, string(roleJSON))
 	if err != nil {
 		return err
 	}
 
-	// No need to update role in memory cache again.
+	// Update role in memory cache.
+	role.Permissions = permissions
+
 	return nil
 }
 
@@ -177,7 +433,7 @@ func (m *roleManager) AddPermission(name string, permission Permission) error {
 	if err != nil {
 		return errs.ErrJSONMarshal.Wrap(err).GenWithStackByCause()
 	}
-	rolePath := path.Join(rolePrefix, name)
+	rolePath := GetRolePath(name)
 
 	// Update user in kv.
 	err = m.kv.Save(rolePath, string(roleJSON))
@@ -185,7 +441,7 @@ func (m *roleManager) AddPermission(name string, permission Permission) error {
 		return err
 	}
 
-	// Update user in memory cache.
+	// Update role in memory cache.
 	m.roles[name] = role
 
 	return nil
@@ -209,7 +465,7 @@ func (m *roleManager) RemovePermission(name string, permission Permission) error
 	if err != nil {
 		return errs.ErrJSONMarshal.Wrap(err).GenWithStackByCause()
 	}
-	rolePath := path.Join(rolePrefix, name)
+	rolePath := GetRolePath(name)
 
 	// Update user in kv.
 	err = m.kv.Save(rolePath, string(roleJSON))
@@ -217,17 +473,18 @@ func (m *roleManager) RemovePermission(name string, permission Permission) error
 		return err
 	}
 
-	// Update user in memory cache.
+	// Update role in memory cache.
 	m.roles[name] = role
 
 	return nil
 }
 
+// UpdateCache refreshes in-memory cache of roles.
 func (m *roleManager) UpdateCache() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	rolePath := strings.Join([]string{rolePrefix, ""}, "/")
+	rolePath := GetRolePath("")
 
 	keys, values, err := m.kv.LoadRange(rolePath, clientv3.GetPrefixRangeEnd(rolePath), 0)
 	if err != nil {
@@ -237,7 +494,7 @@ func (m *roleManager) UpdateCache() error {
 	m.roles = make(map[string]*Role)
 	for i := range keys {
 		value := values[i]
-		role, err := NewRoleFromJSON(value)
+		role, err := UnmarshalRole(value)
 		if err != nil {
 			return err
 		}
