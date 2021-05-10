@@ -93,6 +93,23 @@ func (s *selectedStores) getDistributionByGroupLocked(group string) (map[uint64]
 	return nil, false
 }
 
+func (s *selectedStores) totalCountByStore(storeID uint64) uint64 {
+	groups := s.groupDistribution.GetAllID()
+	totalCount := uint64(0)
+	for _, group := range groups {
+		storeDistribution, ok := s.getDistributionByGroupLocked(group)
+		if !ok {
+			continue
+		}
+		count, ok := storeDistribution[storeID]
+		if !ok {
+			continue
+		}
+		totalCount += count
+	}
+	return totalCount
+}
+
 // RegionScatterer scatters regions.
 type RegionScatterer struct {
 	ctx            context.Context
@@ -336,9 +353,26 @@ func (r *RegionScatterer) selectCandidates(region *core.RegionInfo, sourceStoreI
 	filters = append(filters, scoreGuard)
 	stores := r.cluster.GetStores()
 	candidates := make([]uint64, 0)
+	maxStoreTotalCount := uint64(0)
+	minStoreTotalCount := uint64(math.MaxUint64)
+	for _, store := range r.cluster.GetStores() {
+		count := context.selectedPeer.totalCountByStore(store.GetID())
+		if count > maxStoreTotalCount {
+			maxStoreTotalCount = count
+		}
+		if count < minStoreTotalCount {
+			minStoreTotalCount = count
+		}
+	}
 	for _, store := range stores {
-		if filter.Target(r.cluster, store, filters) && !store.IsBusy() {
-			candidates = append(candidates, store.GetID())
+		storeCount := context.selectedPeer.totalCountByStore(store.GetID())
+		// If storeCount is equal to the maxStoreTotalCount, we should skip this store as candidate.
+		// If the storeCount are all the same for the whole cluster(maxStoreTotalCount == minStoreTotalCount), any store
+		// could be selected as candidate.
+		if storeCount < maxStoreTotalCount || maxStoreTotalCount == minStoreTotalCount {
+			if filter.Target(r.cluster, store, filters) && !store.IsBusy() {
+				candidates = append(candidates, store.GetID())
+			}
 		}
 	}
 	return candidates
