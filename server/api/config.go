@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"go.uber.org/zap"
 	"io"
 	"net/http"
 	"reflect"
@@ -83,6 +84,8 @@ func (h *confHandler) GetDefault(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {string} string "PD server failed to proceed the request."
 // @Router /config [post]
 func (h *confHandler) Post(w http.ResponseWriter, r *http.Request) {
+	log.Info("in Post", zap.Any("host", r.RemoteAddr))
+
 	cfg := h.svr.GetConfig()
 	data, err := io.ReadAll(r.Body)
 	r.Body.Close()
@@ -356,6 +359,9 @@ func (h *confHandler) GetSchedule(w http.ResponseWriter, r *http.Request) {
 // @Router /config/schedule [post]
 func (h *confHandler) SetSchedule(w http.ResponseWriter, r *http.Request) {
 	config := h.svr.GetScheduleConfig()
+
+	log.Info("in SetSchedule", zap.Any("host", r.RemoteAddr))
+
 	if err := apiutil.ReadJSONRespondError(h.rd, w, r.Body, &config); err != nil {
 		return
 	}
